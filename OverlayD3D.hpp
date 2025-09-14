@@ -28,7 +28,7 @@ struct XY { int x, y; };
 
 // Настройки кружка
 #ifndef OD3D_DOT_RADIUS_PX
-#define OD3D_DOT_RADIUS_PX 6.0f
+#define OD3D_DOT_RADIUS_PX 4.0f
 #endif
 #ifndef OD3D_DOT_COLOR_RGBA   // обычный RGBA в 0..1 (премультиплирование сделаем в PS)
 #define OD3D_DOT_COLOR_RGBA 1.0f, 1.0f, 0.0f, 1.0f // жёлтая, непрозрачная
@@ -38,7 +38,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_NCHITTEST:     return HTTRANSPARENT;   // клики сквозь
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;   // не активировать
-    case WM_SETCURSOR:     return FALSE;           // НЕ управляем курсором
+    case WM_SETCURSOR:
+        // Курсор не показываем, пока мышь над нашим окном (игра под ним сама решает, что делать)
+        SetCursor(nullptr);
+        return TRUE;
     case WM_DESTROY:       PostQuitMessage(0); return 0;
     default:               return DefWindowProcW(h, m, w, l);
     }
@@ -99,7 +102,7 @@ struct Ctx {
         wc.hCursor = nullptr;
         RegisterClassExW(&wc);
 
-        DWORD ex = WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+        DWORD ex = WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED;
         DWORD st = WS_POPUP;
 
         hwnd = CreateWindowExW(

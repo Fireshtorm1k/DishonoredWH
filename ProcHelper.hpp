@@ -71,3 +71,28 @@
         CloseHandle(snap);
         return found;
     }
+
+
+    uintptr_t GetModuleBaseAddress(DWORD pid, const wchar_t* moduleName)
+    {
+        uintptr_t baseAddress = 0;
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if (hSnap != INVALID_HANDLE_VALUE)
+        {
+            MODULEENTRY32W me;
+            me.dwSize = sizeof(me);
+            if (Module32FirstW(hSnap, &me))
+            {
+                do
+                {
+                    if (!_wcsicmp(me.szModule, moduleName))
+                    {
+                        baseAddress = (uintptr_t)me.modBaseAddr;
+                        break;
+                    }
+                } while (Module32NextW(hSnap, &me));
+            }
+            CloseHandle(hSnap);
+        }
+        return baseAddress;
+    }

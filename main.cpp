@@ -119,30 +119,32 @@ int main() {
     const Projector proj(W, H, Fh_deg, /*right_is_negative*/true);
 
     // --- Известные адреса (как у вас) ---
-    const std::uint64_t camTransform = 0x7FF699A259A0ull;
-    const std::uint64_t posOffset = 0x300ull; // смещение Vec3 в объекте
-    const float maxDist = 10.0f;
+   
+    const float maxDist = 20.0f;
     const float maxDist2 = maxDist * maxDist;
 
-    // vptr целевых объектов
-    //const std::uint64_t movable_vptr = 0x7FF698ABDE18ull;
-     const std::uint64_t movable_vptr = 0x7FF698ABE258ull;
-    // const std::uint64_t usable_vptr  = 0x7FF698ABEC38ull; // (если пригодится позднее)
-    // const std::uint64_t idClass_vptr = 0x7FF69895C930ull; // *** РАНЬШЕ использовалось неправильно
+
 
     // --- Открываем процесс ---
     std::optional<int> pid = pid_by_name("Dishonored2");
-
+    
     if (!pid) { std::printf("Cannot find process\n"); return 1; }
-
-    HWND game = pid ? find_main_hwnd((DWORD)*pid) : nullptr;
-    bool ok = overlay_d3d::init_for_monitor(0);
-    std::printf("overlay init: %s\n", ok ? "OK" : "FAIL");
     hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid.value());
     if (!hProc) {
         std::printf("OpenProcess failed, GetLastError=%lu\n", GetLastError());
         return 1;
     }
+    uintptr_t moduleBase = GetModuleBaseAddress(pid.value(), L"Dishonored2.exe");
+
+    const std::uint64_t camTransform = moduleBase + 0x2BC59A0;
+    const std::uint64_t posOffset = 0x300ull; // смещение Vec3 в объекте
+
+    const std::uint64_t movable_vptr = moduleBase + 0x1C5E258;
+
+    HWND game = pid ? find_main_hwnd((DWORD)*pid) : nullptr;
+    bool ok = overlay_d3d::init_for_monitor(0);
+    std::printf("overlay init: %s\n", ok ? "OK" : "FAIL");
+    
     std::signal(SIGINT, on_sigint);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); // немножко помогает
 
@@ -284,7 +286,7 @@ int main() {
         }
 
         // Лёгкий троттлинг
-        Sleep(10);
+        //Sleep(10);
     }
 
     if (hProc) CloseHandle(hProc);
