@@ -15,7 +15,8 @@
 //#include "OverlayPoints.hpp"
 #include "ProcHelper.hpp"
 #include "MemoryScanner.hpp"
-#include "OverlayD3D.hpp"
+//#include "OverlayD3D.hpp"
+#include "OverlayImGuiDX11.hpp"
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -29,28 +30,28 @@ static inline Vec3 sub(const Vec3& a, const Vec3& b) { return { a.x - b.x, a.y -
 // Математика проекции с предвычисленными коэффициентами
 struct Projector {
     int W, H;
-    double halfW, halfH;
-    double kx, ky;
-    double signX;
-    Projector(int w, int h, double Fh_deg, bool right_is_negative = true)
+    float halfW, halfH;
+    float kx, ky;
+    float signX;
+    Projector(int w, int h, float Fh_deg, bool right_is_negative = true)
         : W(w), H(h), halfW(w * 0.5), halfH(h * 0.5), signX(right_is_negative ? -1.0 : 1.0)
     {
-        const double aspect = double(W) / double(H);
-        const double Fh = Fh_deg * M_PI / 180.0;
-        const double Fv = 2.0 * std::atan(std::tan(Fh * 0.5) / aspect);
+        const float aspect = float(W) / float(H);
+        const float Fh = Fh_deg * M_PI / 180.0;
+        const float Fv = 2.0 * std::atan(std::tan(Fh * 0.5) / aspect);
         kx = halfW / std::tan(Fh * 0.5);
         ky = halfH / std::tan(Fv * 0.5);
     }
 
     // Возвращает false, если точка за спиной/вне экрана
     inline bool project(const Vec3& X_world, const Vec3& C_cam, const Mat3& R,
-        double& u, double& v) const noexcept
+        float& u, float& v) const noexcept
     {
         const Vec3 d = { X_world.x - C_cam.x, X_world.y - C_cam.y, X_world.z - C_cam.z };
-        const double cx = R.m[0][0] * d.x + R.m[0][1] * d.y + R.m[0][2] * d.z;
+        const float cx = R.m[0][0] * d.x + R.m[0][1] * d.y + R.m[0][2] * d.z;
         if (cx <= 0.0) return false;
-        const double cy = R.m[1][0] * d.x + R.m[1][1] * d.y + R.m[1][2] * d.z;
-        const double cz = R.m[2][0] * d.x + R.m[2][1] * d.y + R.m[2][2] * d.z;
+        const float cy = R.m[1][0] * d.x + R.m[1][1] * d.y + R.m[1][2] * d.z;
+        const float cz = R.m[2][0] * d.x + R.m[2][1] * d.y + R.m[2][2] * d.z;
         u = halfW + signX * kx * (cy / cx);
         v = halfH - ky * (cz / cx);
         return (u >= 0.0 && u <= W && v >= 0.0 && v <= H);
@@ -81,12 +82,6 @@ static inline bool read_cam_transform(HANDLE h, uintptr_t addr, Vec3& C, Mat3& R
 }
 
 HANDLE hProc = nullptr;
-std::atomic<bool> g_stop{ false };
-void on_sigint(int) {
-    if (hProc) CloseHandle(hProc);
-    g_stop.store(true, std::memory_order_relaxed);
-    ExitProcess(0);
-}
 
 // --- Структура для батч‑чтения по страницам ---
 struct ObjAddr {
@@ -107,46 +102,34 @@ HWND find_main_hwnd(DWORD pid) {
     return c.h;
 }
 
-
-int main() {
-    static_assert(sizeof(Vec3) == 3 * sizeof(float), "Vec3 layout");
-    static_assert(sizeof(Mat3) == 9 * sizeof(float), "Mat3 layout");
-    static_assert(sizeof(void*) == 0x8, "x64 only");
-    
+static void GenerateSnapshot_RPM(std::vector<Point>& out, float size, ImU32 color) {
+    out.clear();
     // --- Параметры рендера / камеры ---
     const int W = 2560, H = 1440;
     const double Fh_deg = 110.0;
     const Projector proj(W, H, Fh_deg, /*right_is_negative*/true);
 
-    // --- Известные адреса (как у вас) ---
-   
     const float maxDist = 20.0f;
     const float maxDist2 = maxDist * maxDist;
 
 
 
     // --- Открываем процесс ---
-    std::optional<int> pid = pid_by_name("Dishonored2");
-    
-    if (!pid) { std::printf("Cannot find process\n"); return 1; }
+    std::optional<int> pid = pid_by_name("MyTestUEGame");
+
+    if (!pid) { std::printf("Cannot find process\n"); exit(1); }
     hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid.value());
     if (!hProc) {
         std::printf("OpenProcess failed, GetLastError=%lu\n", GetLastError());
-        return 1;
     }
-    uintptr_t moduleBase = GetModuleBaseAddress(pid.value(), L"Dishonored2.exe");
+    uintptr_t moduleBase = GetModuleBaseAddress(pid.value(), L"MyTestUEGame.exe");
 
     const std::uint64_t camTransform = moduleBase + 0x2BC59A0;
     const std::uint64_t posOffset = 0x300ull; // смещение Vec3 в объекте
 
     const std::uint64_t movable_vptr = moduleBase + 0x1C5E258;
 
-    HWND game = pid ? find_main_hwnd((DWORD)*pid) : nullptr;
-    bool ok = overlay_d3d::init_for_monitor(0);
-    std::printf("overlay init: %s\n", ok ? "OK" : "FAIL");
-    
-    std::signal(SIGINT, on_sigint);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); // немножко помогает
+
 
     // --- Скан: ускоренная версия выровненным шагом и фильтрами ---
     std::printf("Scanning for vptr=0x%llX...\n", (unsigned long long)movable_vptr);
@@ -162,7 +145,6 @@ int main() {
     if (found.empty()) {
         std::printf("No objects found. Exiting.\n");
         CloseHandle(hProc);
-        return 0;
     }
 
     // --- Предготовим батч‑списки, отсортируем по страницам ---
@@ -188,108 +170,109 @@ int main() {
     pageBuf.resize(static_cast<size_t>(pageSize) + needSpan); // читаем страницу + хвост (если следующая страница есть)
 
     // --- Рабочие буферы для кадра ---
-    std::vector<overlay_d3d::XY> pts; pts.reserve(std::min<std::size_t>(objs.size(), 8000));
+    std::vector<Point> pts; pts.reserve(std::min<std::size_t>(objs.size(), 8000));
+
     Vec3 cam_pos{}; Mat3 R{};
     const size_t kOverlayCap = 8000; // чуть меньше внутреннего лимита
 
-    // --- Главный цикл ---
-    while (!g_stop.load(std::memory_order_relaxed)) {
-        // 1) Камера
-        if (!read_cam_transform(hProc, camTransform, cam_pos, R)) {
-            std::printf("read_cam_transform failed, GetLastError=%lu\n", GetLastError());
-            break;
-        }
 
-        pts.clear();
+    if (!read_cam_transform(hProc, camTransform, cam_pos, R)) {
+        std::printf("read_cam_transform failed, GetLastError=%lu\n", GetLastError());
+    }
 
-        // 2) Обход по страницам (сгруппированы и отсортированы)
-        std::vector<ObjAddr> alive; alive.reserve(objs.size());
-        size_t i = 0;
-        while (i < objs.size()) {
-            const std::uint64_t curBase = objs[i].page_base;
+    pts.clear();
 
-            // Прочитаем страницу + хвост
-            SIZE_T br = 0;
-            const SIZE_T toRead = pageBuf.size(); // pageSize + needSpan
-            BOOL ok = ReadProcessMemory(hProc, reinterpret_cast<LPCVOID>(curBase), pageBuf.data(), toRead, &br);
+    // 2) Обход по страницам (сгруппированы и отсортированы)
+    std::vector<ObjAddr> alive; alive.reserve(objs.size());
+    size_t i = 0;
+    while (i < objs.size()) {
+        const std::uint64_t curBase = objs[i].page_base;
 
-            // Собираем все элементы этой страницы
-            size_t j = i;
-            while (j < objs.size() && objs[j].page_base == curBase) {
-                const ObjAddr& e = objs[j];
+        // Прочитаем страницу + хвост
+        SIZE_T br = 0;
+        const SIZE_T toRead = pageBuf.size(); // pageSize + needSpan
+        BOOL ok = ReadProcessMemory(hProc, reinterpret_cast<LPCVOID>(curBase), pageBuf.data(), toRead, &br);
 
-                bool keep = true; // жив ли адрес
-                // Если чтение страницы не удалось совсем — сбросим адрес
-                if (!ok && br == 0) { keep = false; goto next_item; }
+        // Собираем все элементы этой страницы
+        size_t j = i;
+        while (j < objs.size() && objs[j].page_base == curBase) {
+            const ObjAddr& e = objs[j];
 
-                // Проверим, попадает ли нужный диапазон целиком в наш буфер чтения
-                // (если объект близко к концу страницы, диапазон пересекает следующую страницу).
-                if (e.off_in_page + needSpan <= br) {
-                    // Берём из буфера
-                    const std::uint8_t* p = pageBuf.data() + e.off_in_page;
+            bool keep = true; // жив ли адрес
+            // Если чтение страницы не удалось совсем — сбросим адрес
+            if (!ok && br == 0) { keep = false; goto next_item; }
 
-                    const std::uint64_t vptr = *reinterpret_cast<const std::uint64_t*>(p);
-                    if (vptr != movable_vptr) { keep = false; goto next_item; }
+            // Проверим, попадает ли нужный диапазон целиком в наш буфер чтения
+            // (если объект близко к концу страницы, диапазон пересекает следующую страницу).
+            if (e.off_in_page + needSpan <= br) {
+                // Берём из буфера
+                const std::uint8_t* p = pageBuf.data() + e.off_in_page;
 
-                    const float* pf = reinterpret_cast<const float*>(p + posOffset);
-                    const Vec3 obj_pos{ pf[0], pf[1], pf[2] };
+                const std::uint64_t vptr = *reinterpret_cast<const std::uint64_t*>(p);
+                if (vptr != movable_vptr) { keep = false; goto next_item; }
 
-                    // Быстрые отсечки: дистанция^2, проекция и on-screen
-                    const float dx = obj_pos.x - cam_pos.x;
-                    const float dy = obj_pos.y - cam_pos.y;
-                    const float dz = obj_pos.z - cam_pos.z;
-                    const float dist2 = dx * dx + dy * dy + dz * dz;
-                    if (dist2 > maxDist2) goto next_item;
+                const float* pf = reinterpret_cast<const float*>(p + posOffset);
+                const Vec3 obj_pos{ pf[0], pf[1], pf[2] };
 
-                    double u, v;
-                    if (!proj.project(obj_pos, cam_pos, R, u, v)) goto next_item;
+                // Быстрые отсечки: дистанция^2, проекция и on-screen
+                const float dx = obj_pos.x - cam_pos.x;
+                const float dy = obj_pos.y - cam_pos.y;
+                const float dz = obj_pos.z - cam_pos.z;
+                const float dist2 = dx * dx + dy * dy + dz * dz;
+                if (dist2 > maxDist2) goto next_item;
 
-                    pts.push_back({ (int)std::lround(u), (int)std::lround(v) });
-                    if (pts.size() >= kOverlayCap) goto next_item; // не раздуваем оверлей
-                }
-                else {
-                    // Фоллбек: адрес попал в край страницы — дочитаем индивидуально
-                    // (это редкая ветка)
-                    std::uint64_t vptr = 0;
-                    if (!read_exact(hProc, e.addr, &vptr, sizeof(vptr)) || vptr != movable_vptr) { keep = false; goto next_item; }
+                float u, v;
+                if (!proj.project(obj_pos, cam_pos, R, u, v)) goto next_item;
 
-                    Vec3 obj_pos{};
-                    if (!read_vec3(hProc, e.addr + posOffset, obj_pos)) { keep = false; goto next_item; }
+                pts.push_back({ u, v, .6f, ImGui::ColorConvertFloat4ToU32(ImVec4(.1f,.1f,.1f,.1f)) });
+                if (pts.size() >= kOverlayCap) goto next_item; // не раздуваем оверлей
+            }
+            else {
+                // Фоллбек: адрес попал в край страницы — дочитаем индивидуально
+                // (это редкая ветка)
+                std::uint64_t vptr = 0;
+                if (!read_exact(hProc, e.addr, &vptr, sizeof(vptr)) || vptr != movable_vptr) { keep = false; goto next_item; }
 
-                    const float dx = obj_pos.x - cam_pos.x;
-                    const float dy = obj_pos.y - cam_pos.y;
-                    const float dz = obj_pos.z - cam_pos.z;
-                    const float dist2 = dx * dx + dy * dy + dz * dz;
-                    if (dist2 > maxDist2) goto next_item;
+                Vec3 obj_pos{};
+                if (!read_vec3(hProc, e.addr + posOffset, obj_pos)) { keep = false; goto next_item; }
 
-                    double u, v;
-                    if (!proj.project(obj_pos, cam_pos, R, u, v)) goto next_item;
+                const float dx = obj_pos.x - cam_pos.x;
+                const float dy = obj_pos.y - cam_pos.y;
+                const float dz = obj_pos.z - cam_pos.z;
+                const float dist2 = dx * dx + dy * dy + dz * dz;
+                if (dist2 > maxDist2) goto next_item;
 
-                    pts.push_back({ (int)std::lround(u), (int)std::lround(v) });
-                    if (pts.size() >= kOverlayCap) goto next_item;
-                }
+                float u, v;
+                if (!proj.project(obj_pos, cam_pos, R, u, v)) goto next_item;
 
-            next_item:
-                if (keep) alive.push_back(e);
-                ++j;
+                pts.push_back({ u, v, .6f, ImGui::ColorConvertFloat4ToU32(ImVec4(.1f,.1f,.1f,.1f)) });
+                if (pts.size() >= kOverlayCap) goto next_item;
             }
 
-            i = j; // следующая страница
+        next_item:
+            if (keep) alive.push_back(e);
+            ++j;
         }
 
-        // Сжимаем список адресов (убрали «мертвые» за один проход, без O(n) erase)
-        objs.swap(alive);
+        i = j; // следующая страница
+    }
 
-        // 3) Рисуем только видимые точки, масштаб — в нужный монитор
-        if (!pts.empty()) {
-            overlay_d3d::draw_points(pts.data(), pts.size(), W, H);
-        }
+    // Сжимаем список адресов (убрали «мертвые» за один проход, без O(n) erase)
+    objs.swap(alive);
+}
 
-        // Лёгкий троттлинг
-        //Sleep(10);
+int main() {
+    static_assert(sizeof(Vec3) == 3 * sizeof(float), "Vec3 layout");
+    static_assert(sizeof(Mat3) == 9 * sizeof(float), "Mat3 layout");
+    static_assert(sizeof(void*) == 0x8, "x64 only");
+
+   
+    // --- Главный цикл ---
+    while (true) {
+        // 1) Камера
+       
     }
 
     if (hProc) CloseHandle(hProc);
-	overlay_d3d::shutdown();
     return 0;
 }
