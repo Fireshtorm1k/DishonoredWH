@@ -83,12 +83,33 @@ LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return CallWindowProc(g_OrigWndProc, hWnd, msg, wParam, lParam);
 }
 
+inline float Normalize(float x, float min, float max)
+{
+    if (max == min) return 0.0f; // защита от деления на ноль
+    return (x - min) / (max - min);
+}
+
+
+
+ImVec4 LerpColor(const ImVec4& c1, const ImVec4& c2, float t)
+{
+    return ImVec4(
+        c1.x + (c2.x - c1.x) * t,  // R
+        c1.y + (c2.y - c1.y) * t,  // G
+        c1.z + (c2.z - c1.z) * t,  // B
+        c1.w + (c2.w - c1.w) * t   // A
+    );
+}
+
 
 static std::vector<uintptr_t> objectAddrs;
 static Projector projector(2560, 1440, 110, true);
 uintptr_t camTransform = scanner.getCameraTransform();
 Vec3* camPos = reinterpret_cast<Vec3*>(camTransform);
 Mat3* camRot = reinterpret_cast<Mat3*>(camTransform + sizeof(Vec3));
+
+static uintptr_t deadEntityVptr = (uintptr_t)GetModuleHandle(NULL) + 0x1afc930;
+
 // --- наш Present ---
 HRESULT __stdcall HookPresent(IDXGISwapChain* swap, UINT sync, UINT flags)
 {
@@ -123,28 +144,46 @@ HRESULT __stdcall HookPresent(IDXGISwapChain* swap, UINT sync, UINT flags)
         ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
     }
 
-    static float col[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-    static float maxDistance;
+    static float colNear[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
+    static float colFar[4] =  { 1.0f, 0.0f, 0.0f, 0.25f };
+    static float maxDistance = 10;
+	static float dotsSize = 3.0f;
+    static bool checkForFlags = false;
     // отрисовка меню
     if (g_ShowMenu) {
         ImGui::Begin("Overlay Menu");
         if (ImGui::Button("Reload Cache")) {
 			objectAddrs =  scanner.scanForType(ClassType::Pickup);
         }
-        ImGui::ColorPicker4("Dots Color", col);
+        ImGui::ColorPicker4("Dots NearColor", colNear);
+        ImGui::ColorPicker4("Dots FarColor", colFar);
 		ImGui::SliderFloat("Max Distance", &maxDistance, 10.0f, 1000.0f);
+		ImGui::SliderFloat("Dots Size", &dotsSize, 1.0f, 30.0f);
+        ImGui::Checkbox("Check for flags (WIP)", &checkForFlags);
         ImGui::End();
     }
     ImDrawList* drawList = ImGui::GetForegroundDrawList();
 
     for (const auto& pt : objectAddrs) {
         Vec3* objPos = reinterpret_cast<Vec3*>(pt + 0x300);
-        if(Distance(*objPos, *camPos) > maxDistance)
+        std::erase_if(objectAddrs, [](uintptr_t pt) {
+            Vec3* objPos = reinterpret_cast<Vec3*>(pt + 0x300);
+            return *(uintptr_t*)pt == deadEntityVptr;
+            });
+
+        if (checkForFlags && (*(uintptr_t**)(pt + 0x8) == nullptr))
+            continue;
+            
+		float dist = Distance(*objPos, *camPos);
+        if(dist > maxDistance)
 			continue;
         float x, y;
             if (projector.project(*objPos, *camPos, *camRot,x,y))
             {
-                drawList->AddCircleFilled(ImVec2(x, y), 3, ImColor(1.0f, 0.0f, 0.0f, 1.0f));
+				float norm = Normalize(dist, 0.0f, maxDistance);
+
+                ImVec4 col = LerpColor(ImVec4(colNear[0], colNear[1], colNear[2], colNear[3]),ImVec4(colFar[0], colFar[1], colFar[2], colFar[3]), norm);
+                drawList->AddCircleFilled(ImVec2(x, y), dotsSize, ImGui::ColorConvertFloat4ToU32(col));
             }
     }
     ImGui::Render();

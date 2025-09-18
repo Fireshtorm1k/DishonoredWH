@@ -1,9 +1,7 @@
 ﻿#include "ObjectScanner.h"
-#define NOMINMAX
+
 #include <windows.h>
 #include <intrin.h>
-#include <immintrin.h>
-
 #include <cstdint>
 #include <vector>
 #include <thread>
@@ -17,7 +15,12 @@ struct Region {
     std::uint8_t* base;
     std::size_t   size;
 };
-
+static inline std::size_t page_size() {
+    static std::size_t s = [] {
+        SYSTEM_INFO si{}; GetSystemInfo(&si); return (std::size_t)si.dwPageSize;
+        }();
+    return s;
+}
 static inline bool is_readable(DWORD protect) {
     if (protect & PAGE_GUARD) return false;
     const DWORD p = protect & 0xFF; // базовые флаги
@@ -84,30 +87,35 @@ static bool cpu_has_avx2() {
     return avx2;
 }
 
-// Быстрый выровненный скан AVX2: проверяет каждые 8 байт
-static void scan_region_avx2_aligned(const Region& r, std::uint64_t needle,
+static inline void scan_block_scalar_aligned(std::uintptr_t p, std::uintptr_t pend,
+    std::uint64_t needle,
     std::vector<std::uintptr_t>& out)
 {
-    const std::uintptr_t beg = reinterpret_cast<std::uintptr_t>(r.base);
-    const std::uintptr_t end = beg + r.size;
+    for (; p + 8 <= pend; p += 8) {
+        if (*reinterpret_cast<const std::uint64_t*>(p) == needle) {
+            out.push_back(p);
+        }
+    }
+}
 
-    // Выровняем границы по 8 байт.
-    std::uintptr_t p = align_up(beg, 8);
-    const std::uintptr_t stop = align_down(end, 8);
+#ifdef __AVX2__
+#include <immintrin.h>
+static inline void scan_block_avx2_aligned(std::uintptr_t p, std::uintptr_t pend,
+    std::uint64_t needle,
+    std::vector<std::uintptr_t>& out)
+{
+    const __m256i pat = _mm256_set1_epi64x((long long)needle);
 
-    if (p >= stop) return;
-
-    const __m256i pat = _mm256_set1_epi64x(static_cast<long long>(needle));
-
-    // 32‑байтные блоки: 4×64‑бит
-    for (; p + 32 <= stop; p += 32) {
-        // небольшая подкачка вперёд
-        _mm_prefetch(reinterpret_cast<const char*>(p + 256), _MM_HINT_T0);
+    // основной цикл по 32 байта
+    for (; p + 32 <= pend; p += 32) {
+        // PREFETCH безопасен, но чтобы не волноваться — подстрахуемся по границе страницы
+        if ((p & (page_size() - 1)) == 0) {
+            _mm_prefetch(reinterpret_cast<const char*>(p + 256), _MM_HINT_T0);
+        }
 
         const __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
         const __m256i eq = _mm256_cmpeq_epi64(v, pat);
-        const int mask = _mm256_movemask_pd(_mm256_castsi256_pd(eq)); // 4‑битовая маска
-
+        const int mask = _mm256_movemask_pd(_mm256_castsi256_pd(eq));
         if (mask) {
             if (mask & 0x1) out.push_back(p + 0);
             if (mask & 0x2) out.push_back(p + 8);
@@ -115,14 +123,111 @@ static void scan_region_avx2_aligned(const Region& r, std::uint64_t needle,
             if (mask & 0x8) out.push_back(p + 24);
         }
     }
-
-    // Хвост (по 8 байт)
-    for (; p + 8 <= stop; p += 8) {
+    // хвост
+    for (; p + 8 <= pend; p += 8) {
         if (*reinterpret_cast<const std::uint64_t*>(p) == needle) {
             out.push_back(p);
         }
     }
 }
+#endif
+
+// Медленный, но «непадающий» проход по странице: 8-байтовые чтения под SEH
+static inline void scan_block_scalar_safe(std::uintptr_t p, std::uintptr_t pend,
+    std::uint64_t needle,
+    std::vector<std::uintptr_t>& out)
+{
+    for (; p + 8 <= pend; p += 8) {
+        bool ok = false;
+        std::uint64_t v = 0;
+        __try {
+            v = *reinterpret_cast<const std::uint64_t*>(p);
+            ok = true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+        if (ok && v == needle) out.push_back(p);
+    }
+}
+
+// Страничный скан: на каждую страницу — одна крупная попытка; при исключении fallback к безопасному проходу
+static void scan_region_aligned_robust(const Region& r, std::uint64_t needle,
+    std::vector<std::uintptr_t>& out, bool use_avx2)
+{
+    const std::uintptr_t beg = reinterpret_cast<std::uintptr_t>(r.base);
+    const std::uintptr_t end = beg + r.size;
+
+    std::uintptr_t cur = align_up(beg, 8);
+    const std::uintptr_t stop = align_down(end, 8);
+    if (cur >= stop) return;
+
+    const std::size_t ps = page_size();
+
+    while (cur < stop) {
+        const std::uintptr_t page_end = std::min(stop, align_up(cur + 1, ps));
+
+        // Быстрая попытка: целиком страница
+        bool page_ok = true;
+        __try {
+#ifdef __AVX2__
+            if (use_avx2) scan_block_avx2_aligned(cur, page_end, needle, out);
+            else
+#endif
+                scan_block_scalar_aligned(cur, page_end, needle, out);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            page_ok = false;
+        }
+
+        if (!page_ok) {
+            // Страница оказалась с сюрпризами: медленный «безопасный» проход
+            scan_block_scalar_safe(cur, page_end, needle, out);
+        }
+
+        cur = page_end;
+    }
+}
+
+// Невыровненный (по каждому байту), тоже устойчивый
+static void scan_region_unaligned_robust(const Region& r, std::uint64_t needle,
+    std::vector<std::uintptr_t>& out)
+{
+    const std::uintptr_t beg = reinterpret_cast<std::uintptr_t>(r.base);
+    const std::uintptr_t end = beg + r.size;
+
+    std::uintptr_t cur = beg;
+    const std::size_t ps = page_size();
+
+    while (cur < end) {
+        const std::uintptr_t page_end = std::min(end, align_up(cur + 1, ps));
+
+        bool page_ok = true;
+        __try {
+            for (std::uintptr_t p = cur; p + 8 <= page_end; ++p) {
+                if (*reinterpret_cast<const std::uint64_t*>(p) == needle) {
+                    out.push_back(p);
+                }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            page_ok = false;
+        }
+        if (!page_ok) {
+            // медленный безопасный проход по байтам
+            for (std::uintptr_t p = cur; p + 8 <= page_end; ++p) {
+                bool ok = false;
+                std::uint64_t v = 0;
+                __try {
+                    v = *reinterpret_cast<const std::uint64_t*>(p);
+                    ok = true;
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+                if (ok && v == needle) out.push_back(p);
+            }
+        }
+        cur = page_end;
+    }
+}
+
 
 // Скалярный выровненный скан (fallback без AVX2)
 static void scan_region_scalar_aligned(const Region& r, std::uint64_t needle,
@@ -168,8 +273,7 @@ scan_self_for_pointer(std::uint64_t needle, const ScanOptions& opt = {})
     auto regions = enumerate_readable_regions();
     if (regions.empty()) return {};
 
-    //const bool use_avx2 = cpu_has_avx2() && !opt.unaligned;
-    const bool use_avx2 = false;
+    const bool use_avx2 = cpu_has_avx2() && !opt.unaligned;
     unsigned nt = opt.threads ? opt.threads : 1;
     nt = std::min<unsigned>(nt, regions.size());
     if (nt == 0) nt = 1;
@@ -187,14 +291,17 @@ scan_self_for_pointer(std::uint64_t needle, const ScanOptions& opt = {})
             const Region& rg = regions[i];
 
             if (opt.unaligned) {
-                scan_region_scalar_unaligned(rg, needle, bucket);
-            }
-            else if (use_avx2) {
-                scan_region_avx2_aligned(rg, needle, bucket);
+                scan_region_unaligned_robust(rg, needle, bucket);
             }
             else {
-                scan_region_scalar_aligned(rg, needle, bucket);
+#ifdef __AVX2__
+                const bool use_avx2 = cpu_has_avx2();
+#else
+                const bool use_avx2 = false;
+#endif
+                scan_region_aligned_robust(rg, needle, bucket, use_avx2);
             }
+
         }
         };
 
