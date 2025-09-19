@@ -155,6 +155,9 @@ HRESULT __stdcall HookPresent(IDXGISwapChain* swap, UINT sync, UINT flags)
         if (ImGui::Button("Reload Cache")) {
 			objectAddrs =  scanner.scanForType(ClassType::Pickup);
         }
+        if (ImGui::Button("Clean List")) {
+            objectAddrs.clear();
+        }
         ImGui::ColorPicker4("Dots NearColor", colNear);
         ImGui::ColorPicker4("Dots FarColor", colFar);
 		ImGui::SliderFloat("Max Distance", &maxDistance, 10.0f, 1000.0f);
