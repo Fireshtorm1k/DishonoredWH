@@ -3,7 +3,7 @@
 ## Build
 
 ```bash
-git clone --recurse-submodules
+git clone --recurse-submodules https://github.com/Fireshtorm1k/DishonoredWH.git
 cmake -B build
 cmake --build build --config Release
 ```
