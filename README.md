@@ -4,6 +4,7 @@
 
 ```bash
 git clone --recurse-submodules https://github.com/Fireshtorm1k/DishonoredWH.git
+cd DishonoredWH
 cmake -B build
 cmake --build build --config Release
 ```
