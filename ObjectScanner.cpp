@@ -323,48 +323,6 @@ scan_self_for_pointer(std::uint64_t needle, const ScanOptions& opt = {})
     return out;
 }
 
-// ------------------------- демонстрация -------------------------
-
-static std::uint64_t parse_u64(const char* s) {
-    // Поддержка "0x..." и без префикса
-    std::uint64_t v = 0;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-        std::sscanf(s, "%llx", &v);
-    }
-    else {
-        // Пытаемся как hex, если есть буквы A-F, иначе как десятичное
-        bool is_hex = false;
-        for (const char* p = s; *p; ++p)
-            if ((*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f')) { is_hex = true; break; }
-        if (is_hex) std::sscanf(s, "%llx", &v);
-        else        std::sscanf(s, "%llu", &v);
-    }
-    return v;
-}
-
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::puts("Usage: fast_self_pointer_scan.exe <value> [unaligned]\n"
-            "Example: fast_self_pointer_scan.exe 0x7FFB95631AF6\n"
-            "         fast_self_pointer_scan.exe 0x7FFB95631AF6 unaligned");
-        return 0;
-    }
-
-    const std::uint64_t needle = parse_u64(argv[1]);
-    ScanOptions opt{};
-    if (argc >= 3) opt.unaligned = true;
-
-    auto hits = scan_self_for_pointer(needle, opt);
-
-    std::printf("Found %zu matches for 0x%016llX\n", hits.size(),
-        static_cast<unsigned long long>(needle));
-    for (std::uintptr_t p : hits) {
-        std::printf("  %p\n", reinterpret_cast<void*>(p));
-    }
-    return 0;
-}
-
-
 ObjectScanner::ObjectScanner()
 {
 }

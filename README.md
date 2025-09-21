@@ -21,6 +21,11 @@ cmake --build build --config Release
 <img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/4881758d-f924-49a5-a417-28e9ba375928" />
 <img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/4015d408-63d8-4ae5-84f8-06c51cacd837" />
 
+## Plan for the future
+
+- Automatically detect loading for prevent access violation
+- Autodetect FOV and zoom(`Z`)
+- Add WH for enemies with skeleton rig
 
 ## Contributing
 

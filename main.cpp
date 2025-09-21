@@ -139,7 +139,6 @@ HRESULT __stdcall HookPresent(IDXGISwapChain* swap, UINT sync, UINT flags)
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // обработка клавиш
     if (ImGui::IsKeyPressed(ImGuiKey_Home)) {
         g_ShowMenu = !g_ShowMenu;
         ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
@@ -335,7 +334,6 @@ void HookSwapChain()
     UnregisterClass(wc.lpszClassName, wc.hInstance);
 }
 
-// --- поток старта ---
 DWORD WINAPI ThreadProc(LPVOID)
 {
     HookSwapChain();
