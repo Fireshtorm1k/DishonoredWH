@@ -6,6 +6,7 @@
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
 #include <cmath>
+#include <string>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 
@@ -146,25 +147,111 @@ HRESULT __stdcall HookPresent(IDXGISwapChain* swap, UINT sync, UINT flags)
 
     static float colNear[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
     static float colFar[4] =  { 1.0f, 0.0f, 0.0f, 0.25f };
-    static float maxDistance = 10;
-	static float dotsSize = 3.0f;
-    static bool checkForFlags = false;
-    // отрисовка меню
+    static float maxDistance = 80.0f;
+	static float dotsSize = 15.0f;
+    static bool showNames = false;
+    static std::vector<std::string> filters;
+    static int selectedIndex = -1;        
+    static char inputBuffer[128] = "";
+    static float textOffset[2] = {-200.0f, -200.0f};
+
     if (g_ShowMenu) {
         ImGui::Begin("Overlay Menu");
-        if (ImGui::Button("Reload Cache")) {
-			objectAddrs =  scanner.scanForType(ClassType::Pickup);
+
+        if (ImGui::BeginTabBar("MainTabs"))
+        {
+            if (ImGui::BeginTabItem("General"))
+            {
+                if (ImGui::Button("Reload Cache")) {
+                    objectAddrs = scanner.scanForType(ClassType::Pickup);
+                    objectAddrs.erase(
+                        std::remove_if(objectAddrs.begin(), objectAddrs.end(),
+                            [](uintptr_t addr) {
+                                const char* name = reinterpret_cast<const char*>(addr + 0x30);
+                                if (!name) return true;
+
+                                std::string s(name);
+                                for (const auto& f : filters) {
+                                    if (s.find(f) != std::string::npos) {
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }),
+                        objectAddrs.end()
+                    );
+                }
+                if (ImGui::Button("Clean List")) {
+                    objectAddrs.clear();
+                }
+                ImGui::Checkbox("Show names", &showNames);
+                if (showNames)
+                {
+                    ImGui::SliderFloat2("Text Offset", textOffset, -200.0f, 200.0f);
+                }
+                ImGui::EndTabItem();
+            }
+
+            // Вкладка Appearance
+            if (ImGui::BeginTabItem("Appearance"))
+            {
+                ImGui::ColorPicker4("Dots NearColor", colNear);
+                ImGui::ColorPicker4("Dots FarColor", colFar);
+                ImGui::SliderFloat("Max Distance", &maxDistance, 10.0f, 1000.0f);
+                ImGui::SliderFloat("Dots Size", &dotsSize, 1.0f, 30.0f);
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Filters"))
+            {
+                if (ImGui::BeginListBox("##ItemsList", ImVec2(-FLT_MIN, 8 * ImGui::GetTextLineHeightWithSpacing())))
+                {
+                    for (int i = 0; i < (int)filters.size(); i++)
+                    {
+                        const bool isSelected = (selectedIndex == i);
+                        if (ImGui::Selectable(filters[i].c_str(), isSelected))
+                            selectedIndex = i;
+
+                        if (isSelected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndListBox();
+                }
+
+                ImGui::InputText("##NewItem", inputBuffer, IM_ARRAYSIZE(inputBuffer));
+
+                ImGui::SameLine();
+                if (ImGui::Button("Add") && strlen(inputBuffer) > 0)
+                {
+                    filters.push_back(inputBuffer);
+                    inputBuffer[0] = '\0';
+                }
+
+                if (selectedIndex >= 0)
+                {
+                    if (ImGui::Button("Remove"))
+                    {
+                        filters.erase(filters.begin() + selectedIndex);
+                        selectedIndex = -1;
+                    }
+                }
+                if (selectedIndex == -1)
+                {
+                    ImGui::BeginDisabled();
+                    ImGui::Button("Remove");
+                    ImGui::EndDisabled();
+                }
+
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
         }
-        if (ImGui::Button("Clean List")) {
-            objectAddrs.clear();
-        }
-        ImGui::ColorPicker4("Dots NearColor", colNear);
-        ImGui::ColorPicker4("Dots FarColor", colFar);
-		ImGui::SliderFloat("Max Distance", &maxDistance, 10.0f, 1000.0f);
-		ImGui::SliderFloat("Dots Size", &dotsSize, 1.0f, 30.0f);
-        ImGui::Checkbox("Check for flags (WIP)", &checkForFlags);
+
         ImGui::End();
     }
+
     ImDrawList* drawList = ImGui::GetForegroundDrawList();
 
     for (const auto& pt : objectAddrs) {
@@ -173,20 +260,27 @@ HRESULT __stdcall HookPresent(IDXGISwapChain* swap, UINT sync, UINT flags)
             Vec3* objPos = reinterpret_cast<Vec3*>(pt + 0x300);
             return *(uintptr_t*)pt == deadEntityVptr;
             });
-
-        if (checkForFlags && (*(uintptr_t**)(pt + 0x8) == nullptr))
-            continue;
             
 		float dist = Distance(*objPos, *camPos);
         if(dist > maxDistance)
 			continue;
+
+        
+
         float x, y;
             if (projector.project(*objPos, *camPos, *camRot,x,y))
             {
 				float norm = Normalize(dist, 0.0f, maxDistance);
 
                 ImVec4 col = LerpColor(ImVec4(colNear[0], colNear[1], colNear[2], colNear[3]),ImVec4(colFar[0], colFar[1], colFar[2], colFar[3]), norm);
-                drawList->AddCircleFilled(ImVec2(x, y), dotsSize, ImGui::ColorConvertFloat4ToU32(col));
+                ImU32 color = ImGui::ColorConvertFloat4ToU32(col);
+                drawList->AddCircleFilled(ImVec2(x, y), dotsSize, color);
+                if (showNames)
+                {
+                    const char* objName = reinterpret_cast<const char*>(pt + 0x30);
+                    drawList->AddText(ImVec2(textOffset[0] + x, textOffset[1] + y), color, objName);
+                }
+                
             }
     }
     ImGui::Render();
